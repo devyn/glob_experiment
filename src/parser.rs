@@ -1,33 +1,46 @@
 use anyhow::Result;
 
-use std::{ffi::OsStr, path::Path};
+use std::{
+    ffi::OsStr,
+    path::{is_separator, Component, Path, PathBuf},
+};
 
 #[derive(Debug, Clone)]
 pub struct Pattern {
-    pub components: Vec<PatternComponent>,
+    pub tokens: Tokens,
 }
 
-#[derive(Debug, Clone)]
-pub enum PatternComponent {
-    Prefix(Vec<u8>),
-    RootDir,
-    CurDir,
-    ParentDir,
-    Recurse,
-    Normal(Tokens),
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Tokens(Vec<Token>);
+
+impl std::ops::Deref for Tokens {
+    type Target = Vec<Token>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Tokens {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Token {
+    Separator,
+    Prefix(Vec<u8>),
+    RootDir,
+    Recurse,
+    LiteralString(Vec<u8>),
     AnyCharacter,
     Wildcard,
     Characters(Vec<CharacterClass>),
-    Alternatives(Vec<Tokens>),
-    Repeat { tokens: Tokens, min: u32, max: u32 },
-    LiteralString(Vec<u8>),
+    BeginScope,
+    EndScope,
+    Alternative,
+    Repeat { min: u32, max: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -37,42 +50,48 @@ pub enum CharacterClass {
 }
 
 pub fn parse(string: impl AsRef<OsStr>) -> Pattern {
-    let components = Path::new(string.as_ref())
-        .components()
-        .map(parse_component)
-        .collect();
-    Pattern { components }
-}
+    let path = Path::new(string.as_ref());
+    let mut components_iter = path.components().peekable();
 
-pub fn parse_component(component: std::path::Component<'_>) -> PatternComponent {
-    match component {
-        std::path::Component::Prefix(prefix) => {
-            PatternComponent::Prefix(prefix.as_os_str().as_encoded_bytes().into())
-        }
-        std::path::Component::RootDir => PatternComponent::RootDir,
-        std::path::Component::CurDir => PatternComponent::CurDir,
-        std::path::Component::ParentDir => PatternComponent::ParentDir,
-        std::path::Component::Normal(string) if string.as_encoded_bytes() == b"**" => {
-            PatternComponent::Recurse
-        }
-        std::path::Component::Normal(string) => {
-            PatternComponent::Normal(parse_tokens(string.as_encoded_bytes(), |_| true).0)
-        }
+    // Split the path into prefix components (where no glob pattern is allowed) and others
+    let mut tokens = Tokens::default();
+    let mut path_relative = PathBuf::new();
+    while let Some(Component::Prefix(..) | Component::RootDir) = components_iter.peek() {
+        tokens.push(match components_iter.next() {
+            Some(Component::Prefix(prefix_component)) => {
+                Token::Prefix(prefix_component.as_os_str().as_encoded_bytes().into())
+            }
+            Some(Component::RootDir) => Token::RootDir,
+            _ => unreachable!(),
+        });
     }
+    path_relative.extend(components_iter);
+
+    // Parse the remainder of the path into tokens
+    parse_tokens(
+        path_relative.as_os_str().as_encoded_bytes(),
+        |_| true,
+        &mut tokens,
+    );
+
+    Pattern { tokens }
 }
 
-pub fn parse_tokens(mut string: &[u8], mut cond: impl FnMut(&[u8]) -> bool) -> (Tokens, &[u8]) {
-    let mut tokens = vec![];
+pub fn parse_tokens<'a>(
+    mut string: &'a [u8],
+    mut cond: impl FnMut(&[u8]) -> bool,
+    out: &mut Tokens,
+) -> &'a [u8] {
     while !string.is_empty() && cond(string) {
-        let (token, next_string) = next_token(string);
-        tokens.push(token);
-        string = next_string;
+        string = next_token(string, out);
     }
-    (Tokens(tokens), string)
+    string
 }
 
-pub fn next_token(string: &[u8]) -> (Token, &[u8]) {
-    token_any_character(string)
+pub fn next_token<'a>(string: &'a [u8], out: &mut Tokens) -> &'a [u8] {
+    token_separator((string, out))
+        .or_else(token_any_character)
+        .or_else(token_recurse)
         .or_else(token_wildcard)
         .or_else(token_alternatives)
         .or_else(token_character_class)
@@ -81,69 +100,99 @@ pub fn next_token(string: &[u8]) -> (Token, &[u8]) {
         .unwrap_or_else(|remaining| {
             panic!("failed to generate token. remaining: {:?}", remaining);
         })
+        .0
 }
 
-pub type TokenResult<'a> = Result<(Token, &'a [u8]), &'a [u8]>;
+type TokenInput<'a, 'b> = (&'a [u8], &'b mut Tokens);
+type TokenResult<'a, 'b> = Result<TokenInput<'a, 'b>, TokenInput<'a, 'b>>;
 
-pub fn token_any_character(string: &[u8]) -> TokenResult {
+fn token_separator<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+    match get_utf8_char(string) {
+        Some((ch, next_string)) if is_separator(ch) => {
+            out.push(Token::Separator);
+            Ok((next_string, out))
+        }
+        _ => Err((string, out)),
+    }
+}
+
+fn token_any_character<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
     if string.get(0) == Some(&b'?') {
-        Ok((Token::AnyCharacter, &string[1..]))
+        out.push(Token::AnyCharacter);
+        Ok((&string[1..], out))
     } else {
-        Err(string)
+        Err((string, out))
     }
 }
 
-pub fn token_wildcard(string: &[u8]) -> TokenResult {
+fn token_recurse<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+    if string.get(0..2) == Some(b"**") {
+        out.push(Token::Recurse);
+        Ok((&string[2..], out))
+    } else {
+        Err((string, out))
+    }
+}
+
+fn token_wildcard<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
     if string.get(0) == Some(&b'*') {
-        Ok((Token::Wildcard, &string[1..]))
+        out.push(Token::Wildcard);
+        Ok((&string[1..], out))
     } else {
-        Err(string)
+        Err((string, out))
     }
 }
 
-pub fn token_alternatives(mut string: &[u8]) -> TokenResult {
+fn token_alternatives<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
     let original_string = string;
+    let original_len = out.len();
     if string.get(0) == Some(&b'{') {
         string = &string[1..];
-        let mut alts = vec![];
+        out.push(Token::BeginScope);
         loop {
-            let (alt, next_string) =
-                parse_tokens(string, |string| !matches!(string.get(0), Some(b',' | b'}')));
-            alts.push(alt);
-            string = next_string;
+            string = parse_tokens(
+                string,
+                |string| !matches!(string.get(0), Some(b',' | b'}')),
+                out,
+            );
             match string.get(0) {
                 Some(b',') => {
                     string = &string[1..];
+                    out.push(Token::Alternative);
                 }
                 Some(b'}') => {
                     string = &string[1..];
+                    out.push(Token::EndScope);
                     break;
                 }
                 Some(_) => continue,
-                None => return Err(original_string),
+                None => {
+                    out.truncate(original_len);
+                    return Err((original_string, out));
+                }
             }
         }
-        Ok((Token::Alternatives(alts), string))
+        Ok((string, out))
     } else {
-        Err(original_string)
+        Err((original_string, out))
     }
 }
 
-pub fn token_character_class(mut string: &[u8]) -> TokenResult {
+fn token_character_class<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
     let original_string = string;
     if string.get(0) == Some(&b'[') {
         string = &string[1..];
         let mut classes = vec![];
         loop {
             let Some((start_char, next_string)) = get_utf8_char(string) else {
-                return Err(original_string);
+                return Err((original_string, out));
             };
             string = next_string;
             let ch_class = if string.get(0) == Some(&b'-') {
                 // This is a range, due to the - char
                 string = &string[1..];
                 let Some((end_char, next_string)) = get_utf8_char(string) else {
-                    return Err(original_string);
+                    return Err((original_string, out));
                 };
                 string = next_string;
                 CharacterClass::Range(start_char, end_char)
@@ -158,32 +207,39 @@ pub fn token_character_class(mut string: &[u8]) -> TokenResult {
                     break;
                 }
                 Some(_) => continue,
-                None => return Err(original_string),
+                None => return Err((original_string, out)),
             }
         }
-        Ok((Token::Characters(classes), string))
+        out.push(Token::Characters(classes));
+        Ok((string, out))
     } else {
-        Err(original_string)
+        Err((original_string, out))
     }
 }
 
-pub fn token_repeat(mut string: &[u8]) -> TokenResult {
+fn token_repeat<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
     let original_string = string;
+    let original_len = out.len();
+    macro_rules! fail {
+        () => {
+            out.truncate(original_len);
+            return Err((original_string, out));
+        };
+    }
     if string.get(0) == Some(&b'<') {
+        out.push(Token::BeginScope);
         string = &string[1..];
-        let (tokens, next_string) =
-            parse_tokens(string, |string| !matches!(string.get(0), Some(b':')));
-        string = next_string;
+        string = parse_tokens(string, |string| !matches!(string.get(0), Some(b':')), out);
         if string.get(0) != Some(&b':') {
-            return Err(original_string);
+            fail!();
         }
         string = &string[1..];
         let Some(end_index) = string.iter().position(|byte| *byte == b'>') else {
-            return Err(original_string);
+            fail!();
         };
         let Ok(repeat_params_string) = std::str::from_utf8(&string[..end_index]) else {
             // The parameters must be valid UTF-8
-            return Err(original_string);
+            fail!();
         };
         string = &string[(end_index + 1)..];
         let token =
@@ -191,31 +247,32 @@ pub fn token_repeat(mut string: &[u8]) -> TokenResult {
                 let (min_string, max_string) = repeat_params_string.split_at(comma_index);
                 let Ok(min): Result<u32, _> = min_string.parse() else {
                     // unparseable number
-                    return Err(original_string);
+                    fail!();
                 };
                 let Ok(max): Result<u32, _> = max_string[1..].parse() else {
                     // unparseable number
-                    return Err(original_string);
+                    fail!();
                 };
-                Token::Repeat { tokens, min, max }
+                Token::Repeat { min, max }
             } else {
                 let Ok(times): Result<u32, _> = repeat_params_string.parse() else {
                     // unparseable number
-                    return Err(original_string);
+                    fail!();
                 };
                 Token::Repeat {
-                    tokens,
                     min: times,
                     max: times,
                 }
             };
-        Ok((token, string))
+        out.push(token);
+        out.push(Token::EndScope);
+        Ok((string, out))
     } else {
-        Err(original_string)
+        Err((original_string, out))
     }
 }
 
-pub fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
+fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
     string
         .utf8_chunks()
         .next()
@@ -223,20 +280,21 @@ pub fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
         .map(|ch: char| (ch, &string[ch.len_utf8()..]))
 }
 
-pub fn token_literal_string(string: &[u8]) -> TokenResult {
+fn token_literal_string<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
     // Bytes that can start other tokens
-    const MEANINGFUL_BYTES: &[u8] = b"*?[]{}<>,:";
+    const MEANINGFUL_BYTES: &[u8] = b"*?[]{}<>,:/\\";
     // Take at least one byte, but if we find a meaningful byte, leave that alone for further parsing
     if let Some(index_of_meaningful_byte) = string[1..]
         .iter()
         .position(|byte| MEANINGFUL_BYTES.contains(byte))
         .map(|idx| idx + 1)
     {
-        Ok((
-            Token::LiteralString(string[0..index_of_meaningful_byte].into()),
-            &string[index_of_meaningful_byte..],
-        ))
+        out.push(Token::LiteralString(
+            string[0..index_of_meaningful_byte].into(),
+        ));
+        Ok((&string[index_of_meaningful_byte..], out))
     } else {
-        Ok((Token::LiteralString(string.into()), b""))
+        out.push(Token::LiteralString(string.into()));
+        Ok((b"", out))
     }
 }
