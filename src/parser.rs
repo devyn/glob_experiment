@@ -3,12 +3,12 @@ use anyhow::Result;
 use std::{ffi::OsStr, path::Path};
 
 #[derive(Debug, Clone)]
-pub(crate) struct Pattern {
-    pub(crate) components: Vec<PatternComponent>,
+pub struct Pattern {
+    pub components: Vec<PatternComponent>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum PatternComponent {
+pub enum PatternComponent {
     Prefix(Vec<u8>),
     RootDir,
     CurDir,
@@ -18,10 +18,10 @@ pub(crate) enum PatternComponent {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Tokens(Vec<Token>);
+pub struct Tokens(Vec<Token>);
 
 #[derive(Debug, Clone)]
-pub(crate) enum Token {
+pub enum Token {
     AnyCharacter,
     Wildcard,
     Characters(Vec<CharacterClass>),
@@ -31,12 +31,12 @@ pub(crate) enum Token {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CharacterClass {
+pub enum CharacterClass {
     Single(char),
     Range(char, char),
 }
 
-pub(crate) fn parse(string: impl AsRef<OsStr>) -> Pattern {
+pub fn parse(string: impl AsRef<OsStr>) -> Pattern {
     let components = Path::new(string.as_ref())
         .components()
         .map(parse_component)
@@ -44,7 +44,7 @@ pub(crate) fn parse(string: impl AsRef<OsStr>) -> Pattern {
     Pattern { components }
 }
 
-pub(crate) fn parse_component(component: std::path::Component<'_>) -> PatternComponent {
+pub fn parse_component(component: std::path::Component<'_>) -> PatternComponent {
     match component {
         std::path::Component::Prefix(prefix) => {
             PatternComponent::Prefix(prefix.as_os_str().as_encoded_bytes().into())
@@ -61,10 +61,7 @@ pub(crate) fn parse_component(component: std::path::Component<'_>) -> PatternCom
     }
 }
 
-pub(crate) fn parse_tokens(
-    mut string: &[u8],
-    mut cond: impl FnMut(&[u8]) -> bool,
-) -> (Tokens, &[u8]) {
+pub fn parse_tokens(mut string: &[u8], mut cond: impl FnMut(&[u8]) -> bool) -> (Tokens, &[u8]) {
     let mut tokens = vec![];
     while !string.is_empty() && cond(string) {
         let (token, next_string) = next_token(string);
@@ -74,7 +71,7 @@ pub(crate) fn parse_tokens(
     (Tokens(tokens), string)
 }
 
-pub(crate) fn next_token(string: &[u8]) -> (Token, &[u8]) {
+pub fn next_token(string: &[u8]) -> (Token, &[u8]) {
     token_any_character(string)
         .or_else(token_wildcard)
         .or_else(token_alternatives)
@@ -86,9 +83,9 @@ pub(crate) fn next_token(string: &[u8]) -> (Token, &[u8]) {
         })
 }
 
-pub(crate) type TokenResult<'a> = Result<(Token, &'a [u8]), &'a [u8]>;
+pub type TokenResult<'a> = Result<(Token, &'a [u8]), &'a [u8]>;
 
-pub(crate) fn token_any_character(string: &[u8]) -> TokenResult {
+pub fn token_any_character(string: &[u8]) -> TokenResult {
     if string.get(0) == Some(&b'?') {
         Ok((Token::AnyCharacter, &string[1..]))
     } else {
@@ -96,7 +93,7 @@ pub(crate) fn token_any_character(string: &[u8]) -> TokenResult {
     }
 }
 
-pub(crate) fn token_wildcard(string: &[u8]) -> TokenResult {
+pub fn token_wildcard(string: &[u8]) -> TokenResult {
     if string.get(0) == Some(&b'*') {
         Ok((Token::Wildcard, &string[1..]))
     } else {
@@ -104,7 +101,7 @@ pub(crate) fn token_wildcard(string: &[u8]) -> TokenResult {
     }
 }
 
-pub(crate) fn token_alternatives(mut string: &[u8]) -> TokenResult {
+pub fn token_alternatives(mut string: &[u8]) -> TokenResult {
     let original_string = string;
     if string.get(0) == Some(&b'{') {
         string = &string[1..];
@@ -132,7 +129,7 @@ pub(crate) fn token_alternatives(mut string: &[u8]) -> TokenResult {
     }
 }
 
-pub(crate) fn token_character_class(mut string: &[u8]) -> TokenResult {
+pub fn token_character_class(mut string: &[u8]) -> TokenResult {
     let original_string = string;
     if string.get(0) == Some(&b'[') {
         string = &string[1..];
@@ -170,7 +167,7 @@ pub(crate) fn token_character_class(mut string: &[u8]) -> TokenResult {
     }
 }
 
-pub(crate) fn token_repeat(mut string: &[u8]) -> TokenResult {
+pub fn token_repeat(mut string: &[u8]) -> TokenResult {
     let original_string = string;
     if string.get(0) == Some(&b'<') {
         string = &string[1..];
@@ -218,7 +215,7 @@ pub(crate) fn token_repeat(mut string: &[u8]) -> TokenResult {
     }
 }
 
-pub(crate) fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
+pub fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
     string
         .utf8_chunks()
         .next()
@@ -226,7 +223,7 @@ pub(crate) fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
         .map(|ch: char| (ch, &string[ch.len_utf8()..]))
 }
 
-pub(crate) fn token_literal_string(string: &[u8]) -> TokenResult {
+pub fn token_literal_string(string: &[u8]) -> TokenResult {
     // Bytes that can start other tokens
     const MEANINGFUL_BYTES: &[u8] = b"*?[]{}<>,:";
     // Take at least one byte, but if we find a meaningful byte, leave that alone for further parsing
