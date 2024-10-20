@@ -11,7 +11,7 @@ pub struct Pattern {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Tokens(Vec<Token>);
+pub struct Tokens(pub Vec<Token>);
 
 impl std::ops::Deref for Tokens {
     type Target = Vec<Token>;
@@ -24,6 +24,14 @@ impl std::ops::Deref for Tokens {
 impl std::ops::DerefMut for Tokens {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+impl From<Vec<Token>> for Pattern {
+    fn from(value: Vec<Token>) -> Self {
+        Pattern {
+            tokens: Tokens(value),
+        }
     }
 }
 
