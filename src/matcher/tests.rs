@@ -51,7 +51,7 @@ fn literal_with_separator() {
         Token::LiteralString(b"bar".into()),
     ]);
     let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, none);
+    assert_result!(match_result, complete);
 }
 
 #[test]

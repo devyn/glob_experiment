@@ -73,6 +73,8 @@ impl<'a> Matcher<'a> {
     fn advance(&mut self, tokens: &[Token]) -> Option<MatchResult> {
         eprintln!("{:?}, {:?}", self, tokens);
         if self.pc >= tokens.len() {
+            // If we hit the end of the program, then it can't reasonably be a prefix - but it could
+            // be a complete match if we have no more path components to match.
             Some(MatchResult {
                 valid_as_prefix: false,
                 valid_as_complete_match: self.path_components.next().is_none(),
