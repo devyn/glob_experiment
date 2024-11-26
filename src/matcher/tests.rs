@@ -6,13 +6,23 @@ use crate::{
 };
 
 macro_rules! assert_result {
-    ($result:expr, complete) => {{
-        let result = $result;
+    ($path:expr, $pattern:expr, complete) => {{
+        let result = path_matches_pattern($path, &$pattern);
         assert!(!result.valid_as_prefix);
         assert!(result.valid_as_complete_match);
     }};
-    ($result:expr, none) => {{
-        let result = $result;
+    ($path:expr, $pattern:expr, prefix) => {{
+        let result = path_matches_pattern($path, &$pattern);
+        assert!(result.valid_as_prefix);
+        assert!(!result.valid_as_complete_match);
+    }};
+    ($path:expr, $pattern:expr, complete_and_prefix) => {{
+        let result = path_matches_pattern($path, &$pattern);
+        assert!(result.valid_as_prefix);
+        assert!(result.valid_as_complete_match);
+    }};
+    ($path:expr, $pattern:expr, none) => {{
+        let result = path_matches_pattern($path, &$pattern);
         assert!(!result.valid_as_prefix);
         assert!(!result.valid_as_complete_match);
     }};
@@ -22,24 +32,21 @@ macro_rules! assert_result {
 fn empty_pattern_matches_empty_path() {
     let path = Path::new("");
     let pattern = Pattern::from(vec![]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn single_literal_component() {
     let path = Path::new("foo");
     let pattern = Pattern::from(vec![Token::LiteralString(b"foo".into())]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn mismatching_literal_string() {
     let path = Path::new("foo");
     let pattern = Pattern::from(vec![Token::LiteralString(b"bar".into())]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, none);
+    assert_result!(path, pattern, none);
 }
 
 #[test]
@@ -50,16 +57,14 @@ fn literal_with_separator() {
         Token::Separator,
         Token::LiteralString(b"bar".into()),
     ]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn wildcard_matches_any_component() {
     let path = Path::new("foobarbaz");
     let pattern = Pattern::from(vec![Token::Wildcard]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
 }
 
 #[test]
@@ -70,22 +75,93 @@ fn wildcard_matches_infix() {
         Token::Wildcard,
         Token::LiteralString(b"baz".into()),
     ]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn wildcard_matches_prefix() {
     let path = Path::new("foobarbaz");
     let pattern = Pattern::from(vec![Token::Wildcard, Token::LiteralString(b"baz".into())]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn wildcard_matches_suffix() {
     let path = Path::new("foobarbaz");
     let pattern = Pattern::from(vec![Token::LiteralString(b"foo".into()), Token::Wildcard]);
-    let match_result = path_matches_pattern(path, &pattern);
-    assert_result!(match_result, complete);
+    assert_result!(path, pattern, complete);
+}
+
+fn foo_recurse() -> Pattern {
+    Pattern::from(vec![
+        Token::LiteralString(b"foo".into()),
+        Token::Separator,
+        Token::Recurse,
+    ])
+}
+
+#[test]
+fn recurse_matches_prefix() {
+    let path = Path::new("foo");
+    let pattern = foo_recurse();
+    assert_result!(path, pattern, complete_and_prefix);
+}
+
+#[test]
+fn recurse_matches_nested_1() {
+    let path = Path::new("foo/bar");
+    let pattern = foo_recurse();
+    assert_result!(path, pattern, complete_and_prefix);
+}
+
+#[test]
+fn recurse_matches_nested_2() {
+    let path = Path::new("foo/bar/baz");
+    let pattern = foo_recurse();
+    assert_result!(path, pattern, complete_and_prefix);
+}
+
+fn foo_recurse_bar() -> Pattern {
+    Pattern::from(vec![
+        Token::LiteralString(b"foo".into()),
+        Token::Separator,
+        Token::Recurse,
+        Token::Separator,
+        Token::LiteralString(b"bar".into()),
+    ])
+}
+
+#[test]
+fn recurse_matches_infix_empty() {
+    let path = Path::new("foo/bar");
+    let pattern = foo_recurse_bar();
+    assert_result!(path, pattern, complete);
+}
+
+#[test]
+fn recurse_matches_infix_nested_1() {
+    let path = Path::new("foo/baz/bar");
+    let pattern = foo_recurse_bar();
+    assert_result!(path, pattern, complete);
+}
+
+#[test]
+fn recurse_matches_infix_nested_2() {
+    let path = Path::new("foo/baz/quux/bar");
+    let pattern = foo_recurse_bar();
+    assert_result!(path, pattern, complete);
+}
+
+#[test]
+fn recurse_encourages_infix_further_match() {
+    let path = Path::new("foo");
+    let pattern = foo_recurse_bar();
+    assert_result!(path, pattern, prefix);
+}
+
+#[test]
+fn recurse_encourages_infix_further_match_1() {
+    let path = Path::new("foo/baz");
+    let pattern = foo_recurse_bar();
+    assert_result!(path, pattern, prefix);
 }
