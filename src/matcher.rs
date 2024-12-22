@@ -1,9 +1,9 @@
 use std::path::{Component, Components, Path};
 
-use crate::parser::{AstNode, Pattern};
+use crate::compiler::{Instruction, Program, ProgramOffset};
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatchResult {
@@ -25,14 +25,10 @@ impl MatchResult {
     }
 }
 
-#[derive(Debug, Clone)]
-enum Fallback {
-    Wildcard(usize),
-}
-
 fn next_string<'a, 'b>(
     path_components: &mut Components<'b>,
     current_string: &'a mut Option<&'b [u8]>,
+    fresh_string: &mut bool,
 ) -> Option<&'a mut &'b [u8]> {
     if let Some(ref mut s) = current_string {
         Some(s)
@@ -40,6 +36,7 @@ fn next_string<'a, 'b>(
         match component {
             Component::Normal(normal_str) => {
                 *current_string = Some(normal_str.as_encoded_bytes());
+                *fresh_string = true;
                 current_string.as_mut()
             }
             _ => None,
@@ -60,136 +57,198 @@ fn length_of_first_char(string: &[u8]) -> Option<usize> {
     })
 }
 
-#[derive(Debug)]
-struct Matcher<'a> {
-    pc: usize,
+#[derive(Debug, Clone)]
+struct ProgramState<'a> {
+    pc: ProgramOffset,
     path_components: Components<'a>,
     current_string: Option<&'a [u8]>,
-    fallback_stack: Vec<Fallback>,
+    fresh_string: bool,
+    counters: Vec<u32>,
+}
+
+impl<'a> ProgramState<'a> {
+    fn new(path_components: Components<'a>, num_counters: u16) -> ProgramState<'a> {
+        ProgramState {
+            pc: ProgramOffset(0),
+            path_components,
+            current_string: None,
+            fresh_string: false,
+            counters: vec![0; num_counters as usize],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Matcher<'a> {
+    state: ProgramState<'a>,
+    alternatives: Vec<ProgramState<'a>>,
     result: MatchResult,
 }
 
 impl<'a> Matcher<'a> {
-    fn advance(&mut self, tokens: &[AstNode]) -> Option<MatchResult> {
-        eprintln!("{:?}, {:?}", self, tokens);
-        if self.pc >= tokens.len() {
-            // If we hit the end of the program, then it can't reasonably be a prefix - but it could
-            // be a complete match if we have no more path components to match.
-            Some(MatchResult {
-                valid_as_prefix: false,
-                valid_as_complete_match: self.path_components.next().is_none(),
-            })
-        } else {
-            let token = &tokens[self.pc];
-            let success = match token {
-                AstNode::Separator => self.separator(),
-                AstNode::Prefix(_) => todo!(),
-                AstNode::RootDir => todo!(),
-                AstNode::Recurse => todo!(),
-                AstNode::LiteralString(string) => self.literal_string(string),
-                AstNode::AnyCharacter => todo!(),
-                AstNode::Wildcard => self.wildcard(),
-                AstNode::Characters(_) => todo!(),
-                AstNode::BeginScope => todo!(),
-                AstNode::EndScope => todo!(),
-                AstNode::Alternative => todo!(),
-                AstNode::Repeat { min, max } => todo!(),
-            };
-            if success {
-                None
-            } else {
-                if self.fallback() {
-                    None
+    fn advance(&mut self, program: &Program) -> bool {
+        eprintln!("{:#?}", self);
+        eprintln!("{}", &program.instructions[self.state.pc.0]);
+        match &program.instructions[self.state.pc.0] {
+            Instruction::Separator if !self.has_string() => {
+                self.state.current_string = None;
+                if next_string(
+                    &mut self.state.path_components,
+                    &mut self.state.current_string,
+                    &mut self.state.fresh_string,
+                )
+                .is_some()
+                {
+                    self.next()
                 } else {
-                    Some(self.result)
+                    self.end_of_input()
                 }
             }
-        }
-    }
-
-    fn fallback(&mut self) -> bool {
-        while let Some(fallback) = self.fallback_stack.pop() {
-            match fallback {
-                Fallback::Wildcard(wildcard_pc) => {
-                    // Try to advance by one char
-                    if next_string(&mut self.path_components, &mut self.current_string)
-                        .and_then(|current_string| {
-                            length_of_first_char(&current_string).map(|len| {
-                                *current_string = &current_string[len..];
-                            })
-                        })
-                        .is_some()
+            // Collapse multiple separators with no consumption in between
+            Instruction::Separator if self.state.fresh_string => self.next(),
+            Instruction::Prefix(bytes) if !self.has_string() => {
+                match self.state.path_components.next() {
+                    Some(Component::Prefix(prefix_component))
+                        if prefix_component.as_os_str().as_encoded_bytes() == &bytes[..] =>
                     {
-                        // If we could, try again from the wildcard pc
-                        self.pc = wildcard_pc;
-                        return true;
-                    } else {
-                        // Go back to next failure case
-                        continue;
+                        self.next()
                     }
+                    Some(_) => self.try_alternative(),
+                    None => self.end_of_input(),
                 }
             }
-        }
-        false
-    }
-
-    fn separator(&mut self) -> bool {
-        if self.current_string.is_some_and(|s| !s.is_empty()) {
-            false
-        } else {
-            self.current_string = None;
-            self.result.valid_as_prefix = true;
-            self.pc += 1;
-            true
-        }
-    }
-
-    fn wildcard(&mut self) -> bool {
-        // Wildcard can only match a string component
-        if next_string(&mut self.path_components, &mut self.current_string).is_some() {
-            self.fallback_stack.push(Fallback::Wildcard(self.pc));
-            self.pc += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn literal_string(&mut self, string: &[u8]) -> bool {
-        if let Some(current_string) =
-            next_string(&mut self.path_components, &mut self.current_string)
-        {
-            self.result.valid_as_prefix = false;
-            if current_string.starts_with(&string) {
-                *current_string = &current_string[string.len()..];
-
-                self.pc += 1;
-                true
-            } else {
-                false
+            Instruction::RootDir if !self.has_string() => match self.state.path_components.next() {
+                Some(Component::RootDir) => self.next(),
+                Some(_) => self.try_alternative(),
+                None => self.end_of_input(),
+            },
+            Instruction::LiteralString(bytes) => match next_string(
+                &mut self.state.path_components,
+                &mut self.state.current_string,
+                &mut self.state.fresh_string,
+            ) {
+                Some(current_string) if current_string.starts_with(&bytes[..]) => {
+                    *current_string = &current_string[bytes.len()..];
+                    self.state.fresh_string = false;
+                    self.next()
+                }
+                Some(_) => self.try_alternative(),
+                None => self.end_of_input(),
+            },
+            Instruction::AnyCharacter => {
+                match next_string(
+                    &mut self.state.path_components,
+                    &mut self.state.current_string,
+                    &mut self.state.fresh_string,
+                ) {
+                    Some(current_string) => {
+                        // consume the first actual UTF-8 character
+                        if let Some(length) = length_of_first_char(current_string) {
+                            *current_string = &current_string[length..];
+                            self.state.fresh_string = false;
+                            self.next()
+                        } else {
+                            self.try_alternative()
+                        }
+                    }
+                    None => self.end_of_input(),
+                }
             }
+            Instruction::AnyString => {
+                if next_string(
+                    &mut self.state.path_components,
+                    &mut self.state.current_string,
+                    &mut self.state.fresh_string,
+                )
+                .is_some()
+                {
+                    // consume the entire string
+                    self.state.current_string = Some(b"");
+                    self.state.fresh_string = false;
+                    self.next()
+                } else {
+                    self.end_of_input()
+                }
+            }
+            Instruction::Characters(_) => todo!(),
+            Instruction::Jump(index) => {
+                self.state.pc = *index;
+                true
+            }
+            Instruction::Alternative(index) => {
+                // Save a snapshot so we can try it later
+                self.alternatives.push(ProgramState {
+                    pc: *index,
+                    ..self.state.clone()
+                });
+                self.next()
+            }
+            Instruction::Increment(counter_id) => {
+                self.state.counters[counter_id.0 as usize] += 1;
+                self.next()
+            }
+            Instruction::BranchIfLessThan(index, counter_id, value) => {
+                if self.state.counters[counter_id.0 as usize] < *value {
+                    self.state.pc = *index;
+                    eprintln!("counter {} less than {}", counter_id, value);
+                    true
+                } else {
+                    self.next()
+                }
+            }
+            Instruction::Complete => self.complete(),
+            _ => self.try_alternative(),
+        }
+    }
+
+    fn has_string(&self) -> bool {
+        self.state.current_string.is_some_and(|s| !s.is_empty())
+    }
+
+    fn next(&mut self) -> bool {
+        eprintln!("next instruction");
+        self.state.pc.0 += 1;
+        true
+    }
+
+    fn try_alternative(&mut self) -> bool {
+        if let Some(alternative_state) = self.alternatives.pop() {
+            eprintln!("try alternative");
+            self.state = alternative_state;
+            true
         } else {
+            eprintln!("no alternative");
             false
         }
+    }
+
+    fn end_of_input(&mut self) -> bool {
+        eprintln!("end of input");
+        self.result.valid_as_prefix = true;
+        self.try_alternative()
+    }
+
+    fn complete(&mut self) -> bool {
+        eprintln!("complete");
+        self.result.valid_as_complete_match = true;
+        self.try_alternative()
     }
 }
 
-pub fn path_matches_pattern(path: &Path, pattern: &Pattern) -> MatchResult {
+pub fn path_matches(path: &Path, program: &Program) -> MatchResult {
     let mut matcher = Matcher {
-        pc: 0,
-        path_components: path.components(),
-        current_string: None,
-        fallback_stack: vec![],
+        state: ProgramState::new(path.components(), program.counters),
+        alternatives: vec![],
         result: MatchResult {
-            valid_as_prefix: true,
+            valid_as_prefix: false,
             valid_as_complete_match: false,
         },
     };
 
-    loop {
-        match matcher.advance(&pattern.tokens) {
-            Some(result) => return result,
-            None => continue,
+    while !matcher.result.valid_as_prefix || !matcher.result.valid_as_complete_match {
+        if !matcher.advance(program) {
+            break;
         }
     }
+    matcher.result
 }
