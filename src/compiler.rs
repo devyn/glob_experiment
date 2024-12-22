@@ -173,6 +173,7 @@ fn append_alternatives(out: &mut Program, choices: &[Pattern]) -> anyhow::Result
         out.instructions
             .push(Instruction::Alternative(ProgramOffset::PLACEHOLDER));
     }
+    let mut jumps = Vec::with_capacity(choices.len());
     for (index, choice) in choices.iter().enumerate() {
         let choice_start = out.here();
         if index > 0 {
@@ -183,6 +184,14 @@ fn append_alternatives(out: &mut Program, choices: &[Pattern]) -> anyhow::Result
         for node in &choice.nodes {
             append_program(out, node)?;
         }
+        // We also put a jump to the end
+        jumps.push(out.here());
+        out.instructions
+            .push(Instruction::Jump(ProgramOffset::PLACEHOLDER));
+    }
+    // Fix the jumps to the end
+    for offset in jumps {
+        out.instructions[offset.0] = Instruction::Jump(out.here());
     }
     Ok(())
 }
