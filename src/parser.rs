@@ -13,8 +13,10 @@ pub struct Pattern {
 #[derive(Debug, Clone)]
 pub enum AstNode {
     Separator,
-    Prefix(Vec<u8>),
+    Prefix(String),
     RootDir,
+    CurDir,
+    ParentDir,
     Recurse,
     LiteralString(Vec<u8>),
     AnyCharacter,
@@ -46,7 +48,7 @@ pub fn parse(string: impl AsRef<OsStr>) -> Pattern {
     while let Some(Component::Prefix(..) | Component::RootDir) = components_iter.peek() {
         nodes.push(match components_iter.next() {
             Some(Component::Prefix(prefix_component)) => {
-                AstNode::Prefix(prefix_component.as_os_str().as_encoded_bytes().into())
+                AstNode::Prefix(prefix_component.as_os_str().to_string_lossy().into_owned())
             }
             Some(Component::RootDir) => AstNode::RootDir,
             _ => unreachable!(),
@@ -83,6 +85,7 @@ pub fn next_node<'a>(string: &'a [u8], out: &mut Vec<AstNode>) -> &'a [u8] {
         .or_else(node_alternatives)
         .or_else(node_character_class)
         .or_else(node_repeat)
+        .or_else(node_cur_or_parent_dir)
         .or_else(node_literal_string)
         .unwrap_or_else(|remaining| {
             panic!("failed to generate node. remaining: {:?}", remaining);
@@ -272,6 +275,28 @@ fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
         .next()
         .and_then(|chunk| chunk.valid().chars().next())
         .map(|ch: char| (ch, &string[ch.len_utf8()..]))
+}
+
+fn starts_at_path_component_boundary(string: &[u8]) -> bool {
+    string.is_empty() || get_utf8_char(string).is_some_and(|(ch, _)| is_separator(ch))
+}
+
+fn node_cur_or_parent_dir<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
+    // We have to look behind and ahead to make sure this is an isolated node
+    match out.last() {
+        None | Some(AstNode::RootDir) | Some(AstNode::Separator) => match string {
+            [b'.', b'.', next_string @ ..] if starts_at_path_component_boundary(next_string) => {
+                out.push(AstNode::ParentDir);
+                Ok((next_string, out))
+            }
+            [b'.', next_string @ ..] if starts_at_path_component_boundary(next_string) => {
+                out.push(AstNode::CurDir);
+                Ok((next_string, out))
+            }
+            _ => Err((string, out)),
+        },
+        _ => Err((string, out)),
+    }
 }
 
 fn node_literal_string<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {

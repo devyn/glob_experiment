@@ -1,4 +1,7 @@
-use std::path::{Component, Components, Path};
+use std::{
+    iter::Peekable,
+    path::{Component, Components, Path},
+};
 
 use crate::compiler::{Instruction, Program, ProgramOffset};
 
@@ -25,24 +28,34 @@ impl MatchResult {
     }
 }
 
+#[derive(Debug)]
+enum NextString<'a, 'b> {
+    Normal(&'a mut &'b [u8]),
+    NotNormal,
+    EndOfInput,
+}
+
 fn next_string<'a, 'b>(
-    path_components: &mut Components<'b>,
+    path_components: &mut Peekable<Components<'b>>,
     current_string: &'a mut Option<&'b [u8]>,
     fresh_string: &mut bool,
-) -> Option<&'a mut &'b [u8]> {
+) -> NextString<'a, 'b> {
     if let Some(ref mut s) = current_string {
-        Some(s)
-    } else if let Some(component) = path_components.next() {
+        NextString::Normal(s)
+    } else if let Some(component) = path_components.peek() {
+        // We peek here just in case this is not a normal component
         match component {
-            Component::Normal(normal_str) => {
-                *current_string = Some(normal_str.as_encoded_bytes());
+            Component::Normal(_) => {
+                let Some(Component::Normal(normal_str)) = path_components.next() else {
+                    unreachable!()
+                };
                 *fresh_string = true;
-                current_string.as_mut()
+                NextString::Normal(current_string.insert(normal_str.as_encoded_bytes()))
             }
-            _ => None,
+            _ => NextString::NotNormal,
         }
     } else {
-        None
+        NextString::EndOfInput
     }
 }
 
@@ -60,7 +73,7 @@ fn length_of_first_char(string: &[u8]) -> Option<usize> {
 #[derive(Debug, Clone)]
 struct ProgramState<'a> {
     pc: ProgramOffset,
-    path_components: Components<'a>,
+    path_components: Peekable<Components<'a>>,
     current_string: Option<&'a [u8]>,
     fresh_string: bool,
     counters: Vec<u32>,
@@ -70,7 +83,7 @@ impl<'a> ProgramState<'a> {
     fn new(path_components: Components<'a>, num_counters: u16) -> ProgramState<'a> {
         ProgramState {
             pc: ProgramOffset(0),
-            path_components,
+            path_components: path_components.peekable(),
             current_string: None,
             fresh_string: false,
             counters: vec![0; num_counters as usize],
@@ -92,13 +105,7 @@ impl<'a> Matcher<'a> {
         match &program.instructions[self.state.pc.0] {
             Instruction::Separator if !self.has_string() => {
                 self.state.current_string = None;
-                if next_string(
-                    &mut self.state.path_components,
-                    &mut self.state.current_string,
-                    &mut self.state.fresh_string,
-                )
-                .is_some()
-                {
+                if self.state.path_components.peek().is_some() {
                     self.next()
                 } else {
                     self.end_of_input()
@@ -106,10 +113,10 @@ impl<'a> Matcher<'a> {
             }
             // Collapse multiple separators with no consumption in between
             Instruction::Separator if self.state.fresh_string => self.next(),
-            Instruction::Prefix(bytes) if !self.has_string() => {
+            Instruction::Prefix(string) if !self.has_string() => {
                 match self.state.path_components.next() {
                     Some(Component::Prefix(prefix_component))
-                        if prefix_component.as_os_str().as_encoded_bytes() == &bytes[..] =>
+                        if prefix_component.as_os_str() == &string[..] =>
                     {
                         self.next()
                     }
@@ -122,18 +129,29 @@ impl<'a> Matcher<'a> {
                 Some(_) => self.try_alternative(),
                 None => self.end_of_input(),
             },
+            Instruction::CurDir if !self.has_string() => match self.state.path_components.next() {
+                Some(Component::CurDir) => self.next(),
+                Some(_) => self.try_alternative(),
+                None => self.end_of_input(),
+            },
+            Instruction::ParentDir if !self.has_string() => match self.state.path_components.next()
+            {
+                Some(Component::ParentDir) => self.next(),
+                Some(_) => self.try_alternative(),
+                None => self.end_of_input(),
+            },
             Instruction::LiteralString(bytes) => match next_string(
                 &mut self.state.path_components,
                 &mut self.state.current_string,
                 &mut self.state.fresh_string,
             ) {
-                Some(current_string) if current_string.starts_with(&bytes[..]) => {
+                NextString::Normal(current_string) if current_string.starts_with(&bytes[..]) => {
                     *current_string = &current_string[bytes.len()..];
                     self.state.fresh_string = false;
                     self.next()
                 }
-                Some(_) => self.try_alternative(),
-                None => self.end_of_input(),
+                NextString::Normal(_) | NextString::NotNormal => self.try_alternative(),
+                NextString::EndOfInput => self.end_of_input(),
             },
             Instruction::AnyCharacter => {
                 match next_string(
@@ -141,7 +159,7 @@ impl<'a> Matcher<'a> {
                     &mut self.state.current_string,
                     &mut self.state.fresh_string,
                 ) {
-                    Some(current_string) => {
+                    NextString::Normal(current_string) => {
                         // consume the first actual UTF-8 character
                         if let Some(length) = length_of_first_char(current_string) {
                             *current_string = &current_string[length..];
@@ -151,23 +169,24 @@ impl<'a> Matcher<'a> {
                             self.try_alternative()
                         }
                     }
-                    None => self.end_of_input(),
+                    NextString::NotNormal => self.try_alternative(),
+                    NextString::EndOfInput => self.end_of_input(),
                 }
             }
             Instruction::AnyString => {
-                if next_string(
+                match next_string(
                     &mut self.state.path_components,
                     &mut self.state.current_string,
                     &mut self.state.fresh_string,
-                )
-                .is_some()
-                {
-                    // consume the entire string
-                    self.state.current_string = Some(b"");
-                    self.state.fresh_string = false;
-                    self.next()
-                } else {
-                    self.end_of_input()
+                ) {
+                    NextString::Normal(_) => {
+                        // consume the entire string
+                        self.state.current_string = Some(b"");
+                        self.state.fresh_string = false;
+                        self.next()
+                    }
+                    NextString::NotNormal => self.try_alternative(),
+                    NextString::EndOfInput => self.end_of_input(),
                 }
             }
             Instruction::Characters(_) => todo!(),

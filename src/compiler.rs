@@ -1,5 +1,7 @@
 //! Compiles a glob pattern into a simple set of instructions
 
+use std::path::{Component, PathBuf};
+
 use crate::parser::{AstNode, CharacterClass, Pattern};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +37,10 @@ impl std::fmt::Display for CounterId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     Separator,
-    Prefix(Box<[u8]>),
+    Prefix(Box<str>),
     RootDir,
+    CurDir,
+    ParentDir,
     LiteralString(Box<[u8]>),
     AnyCharacter,
     AnyString,
@@ -53,14 +57,15 @@ impl std::fmt::Display for Instruction {
         const WIDTH: usize = 20;
         match self {
             Instruction::Separator => f.write_str("separator"),
-            Instruction::Prefix(bytes) => {
-                let as_string = String::from_utf8_lossy(bytes);
-                write!(f, "{:<WIDTH$} {}", "prefix", as_string)
+            Instruction::Prefix(string) => {
+                write!(f, "{:<WIDTH$} {:?}", "prefix", string)
             }
             Instruction::RootDir => f.write_str("root-dir"),
+            Instruction::CurDir => f.write_str("cur-dir"),
+            Instruction::ParentDir => f.write_str("parent-dir"),
             Instruction::LiteralString(bytes) => {
                 let as_string = String::from_utf8_lossy(bytes);
-                write!(f, "{:<WIDTH$} {}", "literal-string", as_string)
+                write!(f, "{:<WIDTH$} {:?}", "literal-string", as_string)
             }
             Instruction::AnyCharacter => f.write_str("any-character"),
             Instruction::AnyString => f.write_str("any-string"),
@@ -92,6 +97,7 @@ impl std::fmt::Display for Instruction {
 pub struct Program {
     pub instructions: Vec<Instruction>,
     pub counters: u16,
+    pub absolute_prefix: Option<PathBuf>,
 }
 
 impl Program {
@@ -102,8 +108,14 @@ impl Program {
 
 impl std::fmt::Display for Program {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "# counters={}, absolute_prefix={:?}",
+            self.counters, self.absolute_prefix
+        )?;
+
         for (index, instruction) in self.instructions.iter().enumerate() {
-            write!(f, "{}: {}\n", ProgramOffset(index), instruction)?;
+            writeln!(f, "{}: {}", ProgramOffset(index), instruction)?;
         }
         Ok(())
     }
@@ -117,11 +129,25 @@ fn append_program(out: &mut Program, node: &AstNode) -> anyhow::Result<()> {
         }
         AstNode::Prefix(prefix) => {
             out.instructions
-                .push(Instruction::Prefix(prefix.as_slice().into()));
+                .push(Instruction::Prefix(prefix[..].into()));
+            out.absolute_prefix
+                .get_or_insert(PathBuf::new())
+                .push(prefix);
             Ok(())
         }
         AstNode::RootDir => {
             out.instructions.push(Instruction::RootDir);
+            out.absolute_prefix
+                .get_or_insert(PathBuf::new())
+                .push(Component::RootDir);
+            Ok(())
+        }
+        AstNode::CurDir => {
+            out.instructions.push(Instruction::CurDir);
+            Ok(())
+        }
+        AstNode::ParentDir => {
+            out.instructions.push(Instruction::ParentDir);
             Ok(())
         }
         AstNode::LiteralString(string) => {
