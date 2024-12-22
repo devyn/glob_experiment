@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{
     matcher::path_matches_pattern,
-    parser::{Pattern, Token},
+    parser::{AstNode, Pattern},
 };
 
 macro_rules! assert_result {
@@ -38,14 +38,14 @@ fn empty_pattern_matches_empty_path() {
 #[test]
 fn single_literal_component() {
     let path = Path::new("foo");
-    let pattern = Pattern::from(vec![Token::LiteralString(b"foo".into())]);
+    let pattern = Pattern::from(vec![AstNode::LiteralString(b"foo".into())]);
     assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn mismatching_literal_string() {
     let path = Path::new("foo");
-    let pattern = Pattern::from(vec![Token::LiteralString(b"bar".into())]);
+    let pattern = Pattern::from(vec![AstNode::LiteralString(b"bar".into())]);
     assert_result!(path, pattern, none);
 }
 
@@ -53,9 +53,9 @@ fn mismatching_literal_string() {
 fn literal_with_separator() {
     let path = Path::new("foo/bar");
     let pattern = Pattern::from(vec![
-        Token::LiteralString(b"foo".into()),
-        Token::Separator,
-        Token::LiteralString(b"bar".into()),
+        AstNode::LiteralString(b"foo".into()),
+        AstNode::Separator,
+        AstNode::LiteralString(b"bar".into()),
     ]);
     assert_result!(path, pattern, complete);
 }
@@ -63,7 +63,7 @@ fn literal_with_separator() {
 #[test]
 fn wildcard_matches_any_component() {
     let path = Path::new("foobarbaz");
-    let pattern = Pattern::from(vec![Token::Wildcard]);
+    let pattern = Pattern::from(vec![AstNode::Wildcard]);
     assert_result!(path, pattern, complete);
 }
 
@@ -71,9 +71,9 @@ fn wildcard_matches_any_component() {
 fn wildcard_matches_infix() {
     let path = Path::new("foobarbaz");
     let pattern = Pattern::from(vec![
-        Token::LiteralString(b"foo".into()),
-        Token::Wildcard,
-        Token::LiteralString(b"baz".into()),
+        AstNode::LiteralString(b"foo".into()),
+        AstNode::Wildcard,
+        AstNode::LiteralString(b"baz".into()),
     ]);
     assert_result!(path, pattern, complete);
 }
@@ -81,22 +81,28 @@ fn wildcard_matches_infix() {
 #[test]
 fn wildcard_matches_prefix() {
     let path = Path::new("foobarbaz");
-    let pattern = Pattern::from(vec![Token::Wildcard, Token::LiteralString(b"baz".into())]);
+    let pattern = Pattern::from(vec![
+        AstNode::Wildcard,
+        AstNode::LiteralString(b"baz".into()),
+    ]);
     assert_result!(path, pattern, complete);
 }
 
 #[test]
 fn wildcard_matches_suffix() {
     let path = Path::new("foobarbaz");
-    let pattern = Pattern::from(vec![Token::LiteralString(b"foo".into()), Token::Wildcard]);
+    let pattern = Pattern::from(vec![
+        AstNode::LiteralString(b"foo".into()),
+        AstNode::Wildcard,
+    ]);
     assert_result!(path, pattern, complete);
 }
 
 fn foo_recurse() -> Pattern {
     Pattern::from(vec![
-        Token::LiteralString(b"foo".into()),
-        Token::Separator,
-        Token::Recurse,
+        AstNode::LiteralString(b"foo".into()),
+        AstNode::Separator,
+        AstNode::Recurse,
     ])
 }
 
@@ -123,11 +129,11 @@ fn recurse_matches_nested_2() {
 
 fn foo_recurse_bar() -> Pattern {
     Pattern::from(vec![
-        Token::LiteralString(b"foo".into()),
-        Token::Separator,
-        Token::Recurse,
-        Token::Separator,
-        Token::LiteralString(b"bar".into()),
+        AstNode::LiteralString(b"foo".into()),
+        AstNode::Separator,
+        AstNode::Recurse,
+        AstNode::Separator,
+        AstNode::LiteralString(b"bar".into()),
     ])
 }
 

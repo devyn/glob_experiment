@@ -1,6 +1,6 @@
 use std::path::{Component, Components, Path};
 
-use crate::parser::{Pattern, Token};
+use crate::parser::{AstNode, Pattern};
 
 #[cfg(test)]
 mod tests;
@@ -70,7 +70,7 @@ struct Matcher<'a> {
 }
 
 impl<'a> Matcher<'a> {
-    fn advance(&mut self, tokens: &[Token]) -> Option<MatchResult> {
+    fn advance(&mut self, tokens: &[AstNode]) -> Option<MatchResult> {
         eprintln!("{:?}, {:?}", self, tokens);
         if self.pc >= tokens.len() {
             // If we hit the end of the program, then it can't reasonably be a prefix - but it could
@@ -82,18 +82,18 @@ impl<'a> Matcher<'a> {
         } else {
             let token = &tokens[self.pc];
             let success = match token {
-                Token::Separator => self.separator(),
-                Token::Prefix(_) => todo!(),
-                Token::RootDir => todo!(),
-                Token::Recurse => todo!(),
-                Token::LiteralString(string) => self.literal_string(string),
-                Token::AnyCharacter => todo!(),
-                Token::Wildcard => self.wildcard(),
-                Token::Characters(_) => todo!(),
-                Token::BeginScope => todo!(),
-                Token::EndScope => todo!(),
-                Token::Alternative => todo!(),
-                Token::Repeat { min, max } => todo!(),
+                AstNode::Separator => self.separator(),
+                AstNode::Prefix(_) => todo!(),
+                AstNode::RootDir => todo!(),
+                AstNode::Recurse => todo!(),
+                AstNode::LiteralString(string) => self.literal_string(string),
+                AstNode::AnyCharacter => todo!(),
+                AstNode::Wildcard => self.wildcard(),
+                AstNode::Characters(_) => todo!(),
+                AstNode::BeginScope => todo!(),
+                AstNode::EndScope => todo!(),
+                AstNode::Alternative => todo!(),
+                AstNode::Repeat { min, max } => todo!(),
             };
             if success {
                 None

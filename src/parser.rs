@@ -7,36 +7,11 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct Pattern {
-    pub tokens: Tokens,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Tokens(pub Vec<Token>);
-
-impl std::ops::Deref for Tokens {
-    type Target = Vec<Token>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Tokens {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl From<Vec<Token>> for Pattern {
-    fn from(value: Vec<Token>) -> Self {
-        Pattern {
-            tokens: Tokens(value),
-        }
-    }
+    pub nodes: Vec<AstNode>,
 }
 
 #[derive(Debug, Clone)]
-pub enum Token {
+pub enum AstNode {
     Separator,
     Prefix(Vec<u8>),
     RootDir,
@@ -45,13 +20,17 @@ pub enum Token {
     AnyCharacter,
     Wildcard,
     Characters(Vec<CharacterClass>),
-    BeginScope,
-    EndScope,
-    Alternative,
-    Repeat { min: u32, max: u32 },
+    Alternatives {
+        choices: Vec<Pattern>,
+    },
+    Repeat {
+        min: u32,
+        max: u32,
+        pattern: Pattern,
+    },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CharacterClass {
     Single(char),
     Range(char, char),
@@ -62,131 +41,132 @@ pub fn parse(string: impl AsRef<OsStr>) -> Pattern {
     let mut components_iter = path.components().peekable();
 
     // Split the path into prefix components (where no glob pattern is allowed) and others
-    let mut tokens = Tokens::default();
+    let mut nodes = vec![];
     let mut path_relative = PathBuf::new();
     while let Some(Component::Prefix(..) | Component::RootDir) = components_iter.peek() {
-        tokens.push(match components_iter.next() {
+        nodes.push(match components_iter.next() {
             Some(Component::Prefix(prefix_component)) => {
-                Token::Prefix(prefix_component.as_os_str().as_encoded_bytes().into())
+                AstNode::Prefix(prefix_component.as_os_str().as_encoded_bytes().into())
             }
-            Some(Component::RootDir) => Token::RootDir,
+            Some(Component::RootDir) => AstNode::RootDir,
             _ => unreachable!(),
         });
     }
     path_relative.extend(components_iter);
 
-    // Parse the remainder of the path into tokens
-    parse_tokens(
+    // Parse the remainder of the path into nodes
+    parse_nodes(
         path_relative.as_os_str().as_encoded_bytes(),
         |_| true,
-        &mut tokens,
+        &mut nodes,
     );
 
-    Pattern { tokens }
+    Pattern { nodes }
 }
 
-pub fn parse_tokens<'a>(
+pub fn parse_nodes<'a>(
     mut string: &'a [u8],
     mut cond: impl FnMut(&[u8]) -> bool,
-    out: &mut Tokens,
+    out: &mut Vec<AstNode>,
 ) -> &'a [u8] {
     while !string.is_empty() && cond(string) {
-        string = next_token(string, out);
+        string = next_node(string, out);
     }
     string
 }
 
-pub fn next_token<'a>(string: &'a [u8], out: &mut Tokens) -> &'a [u8] {
-    token_separator((string, out))
-        .or_else(token_any_character)
-        .or_else(token_recurse)
-        .or_else(token_wildcard)
-        .or_else(token_alternatives)
-        .or_else(token_character_class)
-        .or_else(token_repeat)
-        .or_else(token_literal_string)
+pub fn next_node<'a>(string: &'a [u8], out: &mut Vec<AstNode>) -> &'a [u8] {
+    node_separator((string, out))
+        .or_else(node_any_character)
+        .or_else(node_recurse)
+        .or_else(node_wildcard)
+        .or_else(node_alternatives)
+        .or_else(node_character_class)
+        .or_else(node_repeat)
+        .or_else(node_literal_string)
         .unwrap_or_else(|remaining| {
-            panic!("failed to generate token. remaining: {:?}", remaining);
+            panic!("failed to generate node. remaining: {:?}", remaining);
         })
         .0
 }
 
-type TokenInput<'a, 'b> = (&'a [u8], &'b mut Tokens);
-type TokenResult<'a, 'b> = Result<TokenInput<'a, 'b>, TokenInput<'a, 'b>>;
+type NodeInput<'a, 'b> = (&'a [u8], &'b mut Vec<AstNode>);
+type NodeResult<'a, 'b> = Result<NodeInput<'a, 'b>, NodeInput<'a, 'b>>;
 
-fn token_separator<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_separator<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     match get_utf8_char(string) {
         Some((ch, next_string)) if is_separator(ch) => {
-            out.push(Token::Separator);
+            out.push(AstNode::Separator);
             Ok((next_string, out))
         }
         _ => Err((string, out)),
     }
 }
 
-fn token_any_character<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_any_character<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     if string.get(0) == Some(&b'?') {
-        out.push(Token::AnyCharacter);
+        out.push(AstNode::AnyCharacter);
         Ok((&string[1..], out))
     } else {
         Err((string, out))
     }
 }
 
-fn token_recurse<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_recurse<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     if string.get(0..2) == Some(b"**") {
-        out.push(Token::Recurse);
+        out.push(AstNode::Recurse);
         Ok((&string[2..], out))
     } else {
         Err((string, out))
     }
 }
 
-fn token_wildcard<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_wildcard<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     if string.get(0) == Some(&b'*') {
-        out.push(Token::Wildcard);
+        out.push(AstNode::Wildcard);
         Ok((&string[1..], out))
     } else {
         Err((string, out))
     }
 }
 
-fn token_alternatives<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_alternatives<'a, 'b>((mut string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     let original_string = string;
-    let original_len = out.len();
+    let mut choices = vec![];
+    let mut current_out = vec![];
     if string.get(0) == Some(&b'{') {
         string = &string[1..];
-        out.push(Token::BeginScope);
         loop {
-            string = parse_tokens(
+            string = parse_nodes(
                 string,
                 |string| !matches!(string.get(0), Some(b',' | b'}')),
-                out,
+                &mut current_out,
             );
             match string.get(0) {
                 Some(b',') => {
                     string = &string[1..];
-                    out.push(Token::Alternative);
+                    let nodes = std::mem::replace(&mut current_out, vec![]);
+                    choices.push(Pattern { nodes });
                 }
                 Some(b'}') => {
                     string = &string[1..];
-                    out.push(Token::EndScope);
+                    choices.push(Pattern { nodes: current_out });
                     break;
                 }
                 Some(_) => continue,
                 None => {
-                    out.truncate(original_len);
                     return Err((original_string, out));
                 }
             }
         }
+        out.push(AstNode::Alternatives { choices });
         Ok((string, out))
     } else {
         Err((original_string, out))
     }
 }
 
-fn token_character_class<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_character_class<'a, 'b>((mut string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     let original_string = string;
     if string.get(0) == Some(&b'[') {
         string = &string[1..];
@@ -218,26 +198,28 @@ fn token_character_class<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> Token
                 None => return Err((original_string, out)),
             }
         }
-        out.push(Token::Characters(classes));
+        out.push(AstNode::Characters(classes));
         Ok((string, out))
     } else {
         Err((original_string, out))
     }
 }
 
-fn token_repeat<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
+fn node_repeat<'a, 'b>((mut string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
     let original_string = string;
-    let original_len = out.len();
+    let mut current_out = vec![];
     macro_rules! fail {
         () => {
-            out.truncate(original_len);
             return Err((original_string, out));
         };
     }
     if string.get(0) == Some(&b'<') {
-        out.push(Token::BeginScope);
         string = &string[1..];
-        string = parse_tokens(string, |string| !matches!(string.get(0), Some(b':')), out);
+        string = parse_nodes(
+            string,
+            |string| !matches!(string.get(0), Some(b':')),
+            &mut current_out,
+        );
         if string.get(0) != Some(&b':') {
             fail!();
         }
@@ -250,7 +232,7 @@ fn token_repeat<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a
             fail!();
         };
         string = &string[(end_index + 1)..];
-        let token =
+        let node =
             if let Some(comma_index) = repeat_params_string.bytes().position(|byte| byte == b',') {
                 let (min_string, max_string) = repeat_params_string.split_at(comma_index);
                 let Ok(min): Result<u32, _> = min_string.parse() else {
@@ -261,19 +243,23 @@ fn token_repeat<'a, 'b>((mut string, out): TokenInput<'a, 'b>) -> TokenResult<'a
                     // unparseable number
                     fail!();
                 };
-                Token::Repeat { min, max }
+                AstNode::Repeat {
+                    min,
+                    max,
+                    pattern: Pattern { nodes: current_out },
+                }
             } else {
                 let Ok(times): Result<u32, _> = repeat_params_string.parse() else {
                     // unparseable number
                     fail!();
                 };
-                Token::Repeat {
+                AstNode::Repeat {
                     min: times,
                     max: times,
+                    pattern: Pattern { nodes: current_out },
                 }
             };
-        out.push(token);
-        out.push(Token::EndScope);
+        out.push(node);
         Ok((string, out))
     } else {
         Err((original_string, out))
@@ -288,8 +274,8 @@ fn get_utf8_char(string: &[u8]) -> Option<(char, &[u8])> {
         .map(|ch: char| (ch, &string[ch.len_utf8()..]))
 }
 
-fn token_literal_string<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResult<'a, 'b> {
-    // Bytes that can start other tokens
+fn node_literal_string<'a, 'b>((string, out): NodeInput<'a, 'b>) -> NodeResult<'a, 'b> {
+    // Bytes that can start other nodes
     const MEANINGFUL_BYTES: &[u8] = b"*?[]{}<>,:/\\";
     // Take at least one byte, but if we find a meaningful byte, leave that alone for further parsing
     if let Some(index_of_meaningful_byte) = string[1..]
@@ -297,12 +283,12 @@ fn token_literal_string<'a, 'b>((string, out): TokenInput<'a, 'b>) -> TokenResul
         .position(|byte| MEANINGFUL_BYTES.contains(byte))
         .map(|idx| idx + 1)
     {
-        out.push(Token::LiteralString(
+        out.push(AstNode::LiteralString(
             string[0..index_of_meaningful_byte].into(),
         ));
         Ok((&string[index_of_meaningful_byte..], out))
     } else {
-        out.push(Token::LiteralString(string.into()));
+        out.push(AstNode::LiteralString(string.into()));
         Ok((b"", out))
     }
 }
