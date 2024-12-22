@@ -87,8 +87,8 @@ struct Matcher<'a> {
 
 impl<'a> Matcher<'a> {
     fn advance(&mut self, program: &Program) -> bool {
-        eprintln!("{:#?}", self);
-        eprintln!("{}", &program.instructions[self.state.pc.0]);
+        log::debug!("{:#?}", self);
+        log::debug!("{}", &program.instructions[self.state.pc.0]);
         match &program.instructions[self.state.pc.0] {
             Instruction::Separator if !self.has_string() => {
                 self.state.current_string = None;
@@ -190,7 +190,7 @@ impl<'a> Matcher<'a> {
             Instruction::BranchIfLessThan(index, counter_id, value) => {
                 if self.state.counters[counter_id.0 as usize] < *value {
                     self.state.pc = *index;
-                    eprintln!("counter {} less than {}", counter_id, value);
+                    log::debug!("counter {} less than {}", counter_id, value);
                     true
                 } else {
                     self.next()
@@ -206,31 +206,35 @@ impl<'a> Matcher<'a> {
     }
 
     fn next(&mut self) -> bool {
-        eprintln!("next instruction");
+        log::debug!("next instruction");
         self.state.pc.0 += 1;
         true
     }
 
     fn try_alternative(&mut self) -> bool {
         if let Some(alternative_state) = self.alternatives.pop() {
-            eprintln!("try alternative");
+            log::debug!("try alternative");
             self.state = alternative_state;
             true
         } else {
-            eprintln!("no alternative");
+            log::debug!("no alternative");
             false
         }
     }
 
     fn end_of_input(&mut self) -> bool {
-        eprintln!("end of input");
+        log::debug!("end of input");
         self.result.valid_as_prefix = true;
         self.try_alternative()
     }
 
     fn complete(&mut self) -> bool {
-        eprintln!("complete");
-        self.result.valid_as_complete_match = true;
+        if !self.has_string() && self.state.path_components.next().is_none() {
+            log::debug!("complete");
+            self.result.valid_as_complete_match = true;
+        } else {
+            log::debug!("pattern is complete but path not fully consumed");
+        }
         self.try_alternative()
     }
 }

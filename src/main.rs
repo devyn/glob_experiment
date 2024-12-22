@@ -10,6 +10,8 @@ mod parser;
 fn main() -> anyhow::Result<()> {
     const USAGE: &str = "Usage: glob_experiment <pattern> <parse|compile|matches|glob> [path]";
 
+    env_logger::init();
+
     let mut args = std::env::args_os().skip(1);
 
     let pattern_string = args.next().ok_or_else(|| anyhow!(USAGE))?;
@@ -34,11 +36,23 @@ fn main() -> anyhow::Result<()> {
         Some(b"glob") => {
             let pattern = parser::parse(pattern_string);
             let program = Arc::new(compiler::compile(&pattern)?);
+            let current_dir = std::env::current_dir()?;
             let mut stdout = std::io::stdout();
-            for result in globber::glob(program) {
-                let result = result?;
-                stdout.write_all(result.as_os_str().as_encoded_bytes())?;
-                stdout.write_all(b"\n")?;
+            let mut failed = false;
+            for result in globber::glob(current_dir, program) {
+                match result {
+                    Ok(path) => {
+                        stdout.write_all(path.as_os_str().as_encoded_bytes())?;
+                        stdout.write_all(b"\n")?;
+                    }
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        failed = true;
+                    }
+                }
+            }
+            if failed {
+                std::process::exit(1);
             }
         }
         _ => bail!(USAGE),
